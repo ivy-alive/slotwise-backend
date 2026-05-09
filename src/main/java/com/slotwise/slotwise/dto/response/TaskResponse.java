@@ -8,7 +8,6 @@ import lombok.Data;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
-import java.time.LocalTime;
 import java.util.List;
 
 @Data
@@ -17,23 +16,22 @@ public class TaskResponse {
     private String title;
     private TaskType type;
     private Priority priority;
-
-    // Study task
     private Integer totalMinutes;
     private Integer remainingMinutes;
+    private Boolean splittable;
     private Boolean completed;
     private LocalDate completedDate;
+
+    // ONE_TIME only
+    private LocalDate ddl;
+
+    // RECURRING only
     private CycleType cycleType;
     private Integer cycleCount;
-    private DayOfWeek preferredDay;
-    private LocalTime preferredTime;
-    private List<DoneSession> doneSessions;
-
-    // Workout task
-    private Integer durationMinutes;
-    private List<DayOfWeek> scheduledDays;
+    private List<DayOfWeek> preferredDays;
 
     private List<TaskResponse> dependencies;
+    private List<DoneSession> doneSessions;
 
     @Data
     @AllArgsConstructor

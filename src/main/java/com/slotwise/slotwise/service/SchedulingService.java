@@ -3,6 +3,7 @@ package com.slotwise.slotwise.service;
 import com.slotwise.slotwise.dto.response.ConflictResponse;
 import com.slotwise.slotwise.dto.response.ScheduleResponse;
 import com.slotwise.slotwise.enums.CycleType;
+import com.slotwise.slotwise.enums.Priority;
 import com.slotwise.slotwise.enums.TaskType;
 import com.slotwise.slotwise.exception.ResourceNotFoundException;
 import com.slotwise.slotwise.model.*;
@@ -23,7 +24,7 @@ public class SchedulingService {
     private final DayEntryRepository dayEntryRepository;
     private final FreeSlotRepository freeSlotRepository;
     private final TaskRepository taskRepository;
-    private final WorkoutScheduledDayRepository workoutScheduledDayRepository;
+    private final TaskPreferredDayRepository preferredDayRepository;
     private final DailyTaskAllocationRepository allocationRepository;
     private final AllocationSlotRepository allocationSlotRepository;
     private final TaskDependencyRepository taskDependencyRepository;
@@ -33,10 +34,8 @@ public class SchedulingService {
         DayEntry dayEntry = dayEntryRepository.findByDate(date)
                 .orElseThrow(() -> new ResourceNotFoundException("DayEntry not found: " + dateStr));
 
-        // Settle cycle debt from previous cycle before scheduling
         settleCycleDebt(date);
 
-        // Preserve done allocations; only delete undone ones
         List<DailyTaskAllocation> existing = allocationRepository.findByDayEntryId(dayEntry.getId());
         List<DailyTaskAllocation> doneAllocations = existing.stream()
                 .filter(a -> Boolean.TRUE.equals(a.getDone()))
@@ -46,21 +45,16 @@ public class SchedulingService {
                 .collect(Collectors.toList());
         allocationRepository.deleteAll(undoneAllocations);
 
-        // Tasks already done today should not be re-scheduled
         Set<Long> doneTaskIds = doneAllocations.stream()
                 .map(a -> a.getTask().getId())
                 .collect(Collectors.toSet());
 
-        // Load free slots ordered by start time
         List<FreeSlot> freeSlots = freeSlotRepository.findByDayEntryIdOrderByStart(dayEntry.getId());
-
-        // Track the current pointer position in each FreeSlot
         Map<FreeSlot, LocalTime> slotPointers = new LinkedHashMap<>();
         for (FreeSlot slot : freeSlots) {
             slotPointers.put(slot, slot.getStart());
         }
 
-        // Advance pointers past time already consumed by done allocations
         for (DailyTaskAllocation done : doneAllocations) {
             allocationSlotRepository.findByDailyTaskAllocationId(done.getId())
                     .forEach(as -> {
@@ -74,15 +68,26 @@ public class SchedulingService {
         List<ScheduleResponse.AllocationResponse> allocationResponses = new ArrayList<>();
         List<ConflictResponse> conflictResponses = new ArrayList<>();
 
-        // 1. Schedule workout tasks for today (skip already done)
+        // Step 1: RECURRING tasks whose preferred days include today
         DayOfWeek todayDow = date.getDayOfWeek();
-        List<WorkoutScheduledDay> todayWorkouts = workoutScheduledDayRepository.findByDayOfWeek(todayDow);
+        Set<Long> handledRecurringIds = new HashSet<>();
 
-        for (WorkoutScheduledDay wsd : todayWorkouts) {
-            Task task = wsd.getTask();
-            if (doneTaskIds.contains(task.getId())) continue;
-            int needed = task.getDurationMinutes();
-            int available = calculateAvailableMinutes(slotPointers);
+        List<TaskPreferredDay> todayPreferred = preferredDayRepository.findByDayOfWeek(todayDow);
+        List<Task> preferredTodayTasks = todayPreferred.stream()
+                .map(TaskPreferredDay::getTask)
+                .filter(t -> t.getType() == TaskType.RECURRING)
+                .filter(t -> !doneTaskIds.contains(t.getId()))
+                .sorted(Comparator.comparingInt(t -> t.getPriority() == Priority.HIGH ? 0 : 1))
+                .collect(Collectors.toList());
+
+        for (Task task : preferredTodayTasks) {
+            handledRecurringIds.add(task.getId());
+            int needed = task.getTotalMinutes() != null ? task.getTotalMinutes() : 0;
+            if (needed <= 0) continue;
+
+            boolean canSchedule = Boolean.FALSE.equals(task.getSplittable())
+                    ? canFitContiguously(slotPointers, needed)
+                    : calculateAvailableMinutes(slotPointers) >= needed;
 
             DailyTaskAllocation allocation = new DailyTaskAllocation();
             allocation.setDayEntry(dayEntry);
@@ -91,95 +96,92 @@ public class SchedulingService {
             allocation.setActualMinutes(0);
             allocation.setDone(false);
 
-            if (available < needed) {
-                // Not enough time — mark as conflict
-                allocation.setConflict(true);
-                allocationRepository.save(allocation);
+            if (!canSchedule) {
+                if (task.getPriority() == Priority.HIGH) {
+                    allocation.setConflict(true);
+                    allocationRepository.save(allocation);
 
-                ConflictResponse conflict = new ConflictResponse();
-                conflict.setAllocationId(allocation.getId());
-                conflict.setTaskTitle(task.getTitle());
-                conflict.setDurationMinutes(needed);
-                conflict.setAvailableMinutes(available);
-                conflict.setReason("Needs " + needed + " min but only " + available + " min available");
-                conflictResponses.add(conflict);
+                    ConflictResponse conflict = new ConflictResponse();
+                    conflict.setAllocationId(allocation.getId());
+                    conflict.setTaskTitle(task.getTitle());
+                    conflict.setDurationMinutes(needed);
+                    conflict.setAvailableMinutes(calculateAvailableMinutes(slotPointers));
+                    conflict.setReason("Needs " + needed + " min but not enough time available");
+                    conflictResponses.add(conflict);
+                }
+                // LOW priority — skip silently
             } else {
-                // Enough time — schedule normally
                 allocation.setConflict(false);
                 allocationRepository.save(allocation);
-                List<ScheduleResponse.SlotResponse> slotResponses = fillSlots(allocation, needed, slotPointers);
+                List<ScheduleResponse.SlotResponse> slotResponses = Boolean.FALSE.equals(task.getSplittable())
+                        ? fillSlotsContiguously(allocation, needed, slotPointers)
+                        : fillSlots(allocation, needed, slotPointers);
 
-                ScheduleResponse.AllocationResponse ar = new ScheduleResponse.AllocationResponse();
-                ar.setAllocationId(allocation.getId());
-                ar.setTaskTitle(task.getTitle());
-                ar.setTaskType(task.getType());
-                ar.setPlannedMinutes(needed);
-                ar.setActualMinutes(0);
-                ar.setDone(false);
-                ar.setSlots(slotResponses);
+                ScheduleResponse.AllocationResponse ar = buildAllocationResponse(allocation, task, slotResponses);
                 allocationResponses.add(ar);
             }
         }
 
-        // 2. Schedule study tasks sorted by priority, with cycle debt boost
-        List<Task> studyTasks = taskRepository.findByCompletedFalse()
+        // Step 2: All other incomplete tasks (ONE_TIME + RECURRING not yet handled today)
+        List<Task> remainingTasks = taskRepository.findByCompletedFalse()
                 .stream()
-                .filter(t -> t.getType() == TaskType.STUDY)
                 .filter(t -> !doneTaskIds.contains(t.getId()))
+                .filter(t -> !handledRecurringIds.contains(t.getId()))
                 .filter(t -> {
-                    // Skip tasks whose dependencies are not yet completed
                     List<TaskDependency> deps = taskDependencyRepository.findByTaskId(t.getId());
                     return deps.stream()
-                            .allMatch(d -> d.getDependsOn().getCompleted() != null && d.getDependsOn().getCompleted());
+                            .allMatch(d -> Boolean.TRUE.equals(d.getDependsOn().getCompleted()));
                 })
                 .sorted(Comparator.comparingInt((Task t) -> {
-                    // Tasks behind on their cycle are boosted to highest priority
-                    if (!isOnTrackForCycle(t, date))
-                        return -1;
-                    // Tasks with due date approaching within 3 days are boosted
-                    if (t.getDueDate() != null) {
-                        long daysUntilDue = java.time.temporal.ChronoUnit.DAYS.between(date, t.getDueDate());
-                        if (daysUntilDue <= 3 && daysUntilDue >= 0)
-                            return 0;
+                    if (t.getType() == TaskType.RECURRING && !isOnTrackForCycle(t, date)) return -1;
+                    if (t.getType() == TaskType.ONE_TIME && t.getDdl() != null) {
+                        long days = java.time.temporal.ChronoUnit.DAYS.between(date, t.getDdl());
+                        if (days <= 3 && days >= 0) return 0;
                     }
-                    return t.getPriority().ordinal();
+                    return t.getPriority() == Priority.HIGH ? 1 : 2;
                 }))
                 .collect(Collectors.toList());
 
-        for (Task task : studyTasks) {
-            int remaining = task.getRemainingMinutes() != null ? task.getRemainingMinutes() : 0;
-            if (remaining <= 0)
-                continue;
+        for (Task task : remainingTasks) {
+            int minutesToSchedule;
+            if (task.getType() == TaskType.RECURRING) {
+                // For RECURRING tasks in step 2, only schedule if behind on cycle
+                if (isOnTrackForCycle(task, date)) continue;
+                minutesToSchedule = task.getTotalMinutes() != null ? task.getTotalMinutes() : 0;
+            } else {
+                minutesToSchedule = task.getRemainingMinutes() != null ? task.getRemainingMinutes() : 0;
+            }
+
+            if (minutesToSchedule <= 0) continue;
 
             int available = calculateAvailableMinutes(slotPointers);
-            if (available <= 0)
-                break;
+            if (available <= 0) break;
 
-            int planned = Math.min(remaining, available);
+            boolean splittable = !Boolean.FALSE.equals(task.getSplittable());
+
+            if (!splittable) {
+                if (!canFitContiguously(slotPointers, minutesToSchedule)) continue;
+            } else {
+                minutesToSchedule = Math.min(minutesToSchedule, available);
+            }
 
             DailyTaskAllocation allocation = new DailyTaskAllocation();
             allocation.setDayEntry(dayEntry);
             allocation.setTask(task);
-            allocation.setPlannedMinutes(planned);
+            allocation.setPlannedMinutes(minutesToSchedule);
             allocation.setActualMinutes(0);
             allocation.setDone(false);
             allocation.setConflict(false);
             allocationRepository.save(allocation);
 
-            List<ScheduleResponse.SlotResponse> slotResponses = fillSlots(allocation, planned, slotPointers);
+            List<ScheduleResponse.SlotResponse> slotResponses = splittable
+                    ? fillSlots(allocation, minutesToSchedule, slotPointers)
+                    : fillSlotsContiguously(allocation, minutesToSchedule, slotPointers);
 
-            ScheduleResponse.AllocationResponse ar = new ScheduleResponse.AllocationResponse();
-            ar.setAllocationId(allocation.getId());
-            ar.setTaskTitle(task.getTitle());
-            ar.setTaskType(task.getType());
-            ar.setPlannedMinutes(planned);
-            ar.setActualMinutes(0);
-            ar.setDone(false);
-            ar.setSlots(slotResponses);
-            allocationResponses.add(ar);
+            allocationResponses.add(buildAllocationResponse(allocation, task, slotResponses));
         }
 
-        // Prepend done allocations to the response so they always appear
+        // Prepend done allocations to response
         List<ScheduleResponse.AllocationResponse> doneResponses = doneAllocations.stream()
                 .filter(a -> !Boolean.TRUE.equals(a.getConflict()))
                 .map(a -> {
@@ -212,47 +214,41 @@ public class SchedulingService {
         return response;
     }
 
-    // Settle cycle debt from the previous cycle
-    // Called at the start of each schedule generation
     private void settleCycleDebt(LocalDate date) {
-        List<Task> studyTasks = taskRepository.findByCompletedFalse()
+        List<Task> recurringTasks = taskRepository.findByCompletedFalse()
                 .stream()
-                .filter(t -> t.getType() == TaskType.STUDY)
-                .filter(t -> t.getCycleType() != null && t.getCycleType() != CycleType.NONE)
+                .filter(t -> t.getType() == TaskType.RECURRING)
+                .filter(t -> t.getCycleType() != null)
                 .collect(Collectors.toList());
 
-        for (Task task : studyTasks) {
+        for (Task task : recurringTasks) {
             LocalDate prevStart;
             LocalDate prevEnd;
 
             if (task.getCycleType() == CycleType.WEEKLY) {
-                // Previous week range
                 LocalDate thisWeekStart = date.with(
                         java.time.temporal.TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
                 prevStart = thisWeekStart.minusWeeks(1);
                 prevEnd = thisWeekStart.minusDays(1);
             } else {
-                // Previous month range
                 LocalDate thisMonthStart = date.withDayOfMonth(1);
                 prevStart = thisMonthStart.minusMonths(1);
                 prevEnd = thisMonthStart.minusDays(1);
             }
 
-            // Count completed allocations in the previous cycle
             long completedLastCycle = allocationRepository.findByTaskId(task.getId())
                     .stream()
                     .filter(a -> {
                         LocalDate d = a.getDayEntry().getDate();
                         return !d.isBefore(prevStart) && !d.isAfter(prevEnd);
                     })
-                    .filter(a -> a.getDone() != null && a.getDone())
+                    .filter(a -> Boolean.TRUE.equals(a.getDone()))
                     .count();
 
             int required = task.getCycleCount() != null ? task.getCycleCount() : 0;
             int debt = (int) Math.max(required - completedLastCycle, 0);
 
             if (debt > 0) {
-                // Only settle once per cycle — check if already scheduled this cycle
                 LocalDate thisCycleStart = task.getCycleType() == CycleType.WEEKLY
                         ? date.with(java.time.temporal.TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
                         : date.withDayOfMonth(1);
@@ -272,7 +268,6 @@ public class SchedulingService {
         }
     }
 
-    // Calculate total available minutes across all free slots
     private int calculateAvailableMinutes(Map<FreeSlot, LocalTime> slotPointers) {
         int total = 0;
         for (Map.Entry<FreeSlot, LocalTime> entry : slotPointers.entrySet()) {
@@ -285,7 +280,18 @@ public class SchedulingService {
         return total;
     }
 
-    // Fill a task into available free slots, splitting across slots if needed
+    private boolean canFitContiguously(Map<FreeSlot, LocalTime> slotPointers, int minutesNeeded) {
+        for (Map.Entry<FreeSlot, LocalTime> entry : slotPointers.entrySet()) {
+            FreeSlot slot = entry.getKey();
+            LocalTime pointer = entry.getValue();
+            if (pointer.isBefore(slot.getEnd())) {
+                int available = (int) java.time.Duration.between(pointer, slot.getEnd()).toMinutes();
+                if (available >= minutesNeeded) return true;
+            }
+        }
+        return false;
+    }
+
     private List<ScheduleResponse.SlotResponse> fillSlots(
             DailyTaskAllocation allocation,
             int minutesNeeded,
@@ -295,13 +301,11 @@ public class SchedulingService {
         int remaining = minutesNeeded;
 
         for (Map.Entry<FreeSlot, LocalTime> entry : slotPointers.entrySet()) {
-            if (remaining <= 0)
-                break;
+            if (remaining <= 0) break;
 
             FreeSlot slot = entry.getKey();
             LocalTime pointer = entry.getValue();
-            if (!pointer.isBefore(slot.getEnd()))
-                continue;
+            if (!pointer.isBefore(slot.getEnd())) continue;
 
             int available = (int) java.time.Duration.between(pointer, slot.getEnd()).toMinutes();
             int use = Math.min(remaining, available);
@@ -328,9 +332,43 @@ public class SchedulingService {
         return slotResponses;
     }
 
-    // Check if a task is on track for its cycle requirement
+    private List<ScheduleResponse.SlotResponse> fillSlotsContiguously(
+            DailyTaskAllocation allocation,
+            int minutesNeeded,
+            Map<FreeSlot, LocalTime> slotPointers) {
+
+        for (Map.Entry<FreeSlot, LocalTime> entry : slotPointers.entrySet()) {
+            FreeSlot slot = entry.getKey();
+            LocalTime pointer = entry.getValue();
+            if (!pointer.isBefore(slot.getEnd())) continue;
+
+            int available = (int) java.time.Duration.between(pointer, slot.getEnd()).toMinutes();
+            if (available < minutesNeeded) continue;
+
+            LocalTime end = pointer.plusMinutes(minutesNeeded);
+
+            AllocationSlot as = new AllocationSlot();
+            as.setDailyTaskAllocation(allocation);
+            as.setFreeSlot(slot);
+            as.setStart(pointer);
+            as.setEnd(end);
+            as.setMinutes(minutesNeeded);
+            allocationSlotRepository.save(as);
+
+            slotPointers.put(slot, end);
+
+            ScheduleResponse.SlotResponse sr = new ScheduleResponse.SlotResponse();
+            sr.setStart(pointer);
+            sr.setEnd(end);
+            sr.setMinutes(minutesNeeded);
+            return List.of(sr);
+        }
+
+        return List.of();
+    }
+
     private boolean isOnTrackForCycle(Task task, LocalDate date) {
-        if (task.getCycleType() == null || task.getCycleType() == CycleType.NONE) {
+        if (task.getType() != TaskType.RECURRING || task.getCycleType() == null) {
             return true;
         }
 
@@ -348,18 +386,30 @@ public class SchedulingService {
         long completedCount = allocationRepository.findByTaskId(task.getId())
                 .stream()
                 .filter(a -> {
-                    LocalDate allocationDate = a.getDayEntry().getDate();
-                    return !allocationDate.isBefore(start) && !allocationDate.isAfter(end);
+                    LocalDate d = a.getDayEntry().getDate();
+                    return !d.isBefore(start) && !d.isAfter(end);
                 })
-                .filter(a -> a.getDone() != null && a.getDone())
+                .filter(a -> Boolean.TRUE.equals(a.getDone()))
                 .count();
 
         int daysLeft = (int) java.time.temporal.ChronoUnit.DAYS.between(date, end) + 1;
-        // Include cycle debt in the required count
         int cycleDebt = task.getCycleDebt() != null ? task.getCycleDebt() : 0;
         int remaining = (task.getCycleCount() + cycleDebt) - (int) completedCount;
 
         return remaining <= daysLeft;
+    }
+
+    private ScheduleResponse.AllocationResponse buildAllocationResponse(
+            DailyTaskAllocation allocation, Task task, List<ScheduleResponse.SlotResponse> slots) {
+        ScheduleResponse.AllocationResponse ar = new ScheduleResponse.AllocationResponse();
+        ar.setAllocationId(allocation.getId());
+        ar.setTaskTitle(task.getTitle());
+        ar.setTaskType(task.getType());
+        ar.setPlannedMinutes(allocation.getPlannedMinutes());
+        ar.setActualMinutes(0);
+        ar.setDone(false);
+        ar.setSlots(slots);
+        return ar;
     }
 
     public ScheduleResponse getSchedule(String dateStr) {
@@ -370,7 +420,7 @@ public class SchedulingService {
         List<DailyTaskAllocation> allocations = allocationRepository.findByDayEntryId(dayEntry.getId());
 
         List<ScheduleResponse.AllocationResponse> allocationResponses = allocations.stream()
-                .filter(a -> !a.getConflict())
+                .filter(a -> !Boolean.TRUE.equals(a.getConflict()))
                 .map(a -> {
                     ScheduleResponse.AllocationResponse ar = new ScheduleResponse.AllocationResponse();
                     ar.setAllocationId(a.getId());
@@ -388,13 +438,13 @@ public class SchedulingService {
                                 sr.setMinutes(s.getMinutes());
                                 return sr;
                             })
-                            .collect(java.util.stream.Collectors.toList()));
+                            .collect(Collectors.toList()));
                     return ar;
                 })
-                .collect(java.util.stream.Collectors.toList());
+                .collect(Collectors.toList());
 
         List<ConflictResponse> conflictResponses = allocations.stream()
-                .filter(a -> a.getConflict())
+                .filter(a -> Boolean.TRUE.equals(a.getConflict()))
                 .map(a -> {
                     ConflictResponse cr = new ConflictResponse();
                     cr.setAllocationId(a.getId());
@@ -403,7 +453,7 @@ public class SchedulingService {
                     cr.setReason("Insufficient time");
                     return cr;
                 })
-                .collect(java.util.stream.Collectors.toList());
+                .collect(Collectors.toList());
 
         ScheduleResponse response = new ScheduleResponse();
         response.setDate(date);

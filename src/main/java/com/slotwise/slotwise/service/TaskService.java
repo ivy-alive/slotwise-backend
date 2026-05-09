@@ -1,18 +1,17 @@
 package com.slotwise.slotwise.service;
 
-import com.slotwise.slotwise.dto.request.StudyTaskRequest;
-import com.slotwise.slotwise.dto.request.WorkoutTaskRequest;
+import com.slotwise.slotwise.dto.request.TaskRequest;
 import com.slotwise.slotwise.dto.response.TaskResponse;
 import com.slotwise.slotwise.enums.TaskType;
 import com.slotwise.slotwise.exception.ResourceNotFoundException;
 import com.slotwise.slotwise.model.DailyTaskAllocation;
 import com.slotwise.slotwise.model.Task;
 import com.slotwise.slotwise.model.TaskDependency;
-import com.slotwise.slotwise.model.WorkoutScheduledDay;
+import com.slotwise.slotwise.model.TaskPreferredDay;
 import com.slotwise.slotwise.repository.DailyTaskAllocationRepository;
 import com.slotwise.slotwise.repository.TaskDependencyRepository;
+import com.slotwise.slotwise.repository.TaskPreferredDayRepository;
 import com.slotwise.slotwise.repository.TaskRepository;
-import com.slotwise.slotwise.repository.WorkoutScheduledDayRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -24,53 +23,58 @@ import java.util.stream.Collectors;
 public class TaskService {
 
     private final TaskRepository taskRepository;
-    private final WorkoutScheduledDayRepository workoutScheduledDayRepository;
+    private final TaskPreferredDayRepository preferredDayRepository;
     private final DailyTaskAllocationRepository allocationRepository;
     private final TaskDependencyRepository taskDependencyRepository;
 
-    public TaskResponse createStudyTask(StudyTaskRequest request) {
+    public TaskResponse createTask(TaskRequest request) {
         Task task = new Task();
         task.setTitle(request.getTitle());
-        task.setType(TaskType.STUDY);
+        task.setType(request.getType());
         task.setPriority(request.getPriority());
         task.setTotalMinutes(request.getTotalMinutes());
         task.setRemainingMinutes(request.getTotalMinutes());
+        task.setSplittable(request.getSplittable());
         task.setCompleted(false);
-        task.setCycleType(request.getCycleType());
-        task.setCycleCount(request.getCycleCount());
-        task.setPreferredDay(request.getPreferredDay());
-        task.setPreferredTime(request.getPreferredTime());
-        task.setDueDate(request.getDueDate());
-        taskRepository.save(task);
-        if (request.getDependsOnIds() != null) {
-            for (Long dependsOnId : request.getDependsOnIds()) {
-                Task dependsOn = taskRepository.findById(dependsOnId)
-                        .orElseThrow(() -> new ResourceNotFoundException("Task not found: " + dependsOnId));
-                TaskDependency dependency = new TaskDependency();
-                dependency.setTask(task);
-                dependency.setDependsOn(dependsOn);
-                taskDependencyRepository.save(dependency);
-            }
+
+        if (request.getType() == TaskType.ONE_TIME) {
+            task.setDdl(request.getDdl());
+        } else {
+            task.setCycleType(request.getCycleType());
+            task.setCycleCount(request.getCycleCount());
+            task.setCycleDebt(0);
         }
+
+        task = taskRepository.save(task);
+
+        savePreferredDays(task, request.getPreferredDays());
+        saveDependencies(task, request.getDependsOnIds());
+
         return toResponse(task);
     }
 
-    public TaskResponse createWorkoutTask(WorkoutTaskRequest request) {
-        Task task = new Task();
+    public TaskResponse updateTask(Long id, TaskRequest request) {
+        Task task = taskRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Task not found: " + id));
+
         task.setTitle(request.getTitle());
-        task.setType(TaskType.WORKOUT);
         task.setPriority(request.getPriority());
-        task.setDurationMinutes(request.getDurationMinutes());
+        task.setTotalMinutes(request.getTotalMinutes());
+        task.setSplittable(request.getSplittable());
+
+        if (task.getType() == TaskType.ONE_TIME) {
+            task.setDdl(request.getDdl());
+        } else {
+            task.setCycleType(request.getCycleType());
+            task.setCycleCount(request.getCycleCount());
+        }
+
         taskRepository.save(task);
 
-        if (request.getScheduledDays() != null) {
-            for (var day : request.getScheduledDays()) {
-                WorkoutScheduledDay wsd = new WorkoutScheduledDay();
-                wsd.setTask(task);
-                wsd.setDayOfWeek(day);
-                workoutScheduledDayRepository.save(wsd);
-            }
-        }
+        // Replace preferred days
+        List<TaskPreferredDay> existing = preferredDayRepository.findByTaskId(id);
+        preferredDayRepository.deleteAll(existing);
+        savePreferredDays(task, request.getPreferredDays());
 
         return toResponse(task);
     }
@@ -88,63 +92,16 @@ public class TaskService {
         return toResponse(task);
     }
 
-    public TaskResponse updateStudyTask(Long id, StudyTaskRequest request) {
-        Task task = taskRepository.findById(id)
-                .orElseThrow(() -> new ResourceNotFoundException("Task not found: " + id));
-        task.setTitle(request.getTitle());
-        task.setPriority(request.getPriority());
-        task.setTotalMinutes(request.getTotalMinutes());
-        task.setCycleType(request.getCycleType());
-        task.setCycleCount(request.getCycleCount());
-        task.setPreferredDay(request.getPreferredDay());
-        task.setPreferredTime(request.getPreferredTime());
-        task.setDueDate(request.getDueDate());
-        taskRepository.save(task);
-        return toResponse(task);
-    }
-
-    public TaskResponse updateWorkoutTask(Long id, WorkoutTaskRequest request) {
-        Task task = taskRepository.findById(id)
-                .orElseThrow(() -> new ResourceNotFoundException("Task not found: " + id));
-        task.setTitle(request.getTitle());
-        task.setPriority(request.getPriority());
-        task.setDurationMinutes(request.getDurationMinutes());
-
-        // delete old scheduledDays and rewrite with new ones
-        List<WorkoutScheduledDay> existing = workoutScheduledDayRepository.findAll()
-                .stream()
-                .filter(wsd -> wsd.getTask().getId().equals(id))
-                .collect(java.util.stream.Collectors.toList());
-        workoutScheduledDayRepository.deleteAll(existing);
-
-        if (request.getScheduledDays() != null) {
-            for (var day : request.getScheduledDays()) {
-                WorkoutScheduledDay wsd = new WorkoutScheduledDay();
-                wsd.setTask(task);
-                wsd.setDayOfWeek(day);
-                workoutScheduledDayRepository.save(wsd);
-            }
-        }
-        taskRepository.save(task);
-        return toResponse(task);
-    }
-
     public void deleteTask(Long id) {
         Task task = taskRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Task not found: " + id));
 
-        // delete associated allocations first to avoid foreign key constraint issues
         List<DailyTaskAllocation> allocations = allocationRepository.findByTaskId(id);
         allocationRepository.deleteAll(allocations);
 
-        // then delete WorkoutScheduledDays
-        List<WorkoutScheduledDay> wsds = workoutScheduledDayRepository.findAll()
-                .stream()
-                .filter(wsd -> wsd.getTask().getId().equals(id))
-                .collect(java.util.stream.Collectors.toList());
-        workoutScheduledDayRepository.deleteAll(wsds);
+        List<TaskPreferredDay> preferredDays = preferredDayRepository.findByTaskId(id);
+        preferredDayRepository.deleteAll(preferredDays);
 
-        // Delete dependencies where this task is involved
         taskDependencyRepository.deleteAll(taskDependencyRepository.findByTaskId(id));
         taskDependencyRepository.deleteAll(taskDependencyRepository.findByDependsOnId(id));
 
@@ -164,8 +121,8 @@ public class TaskService {
     }
 
     public void removeDependency(Long taskId, Long dependsOnId) {
-        List<TaskDependency> dependencies = taskDependencyRepository.findByTaskId(taskId);
-        dependencies.stream()
+        taskDependencyRepository.findByTaskId(taskId)
+                .stream()
                 .filter(d -> d.getDependsOn().getId().equals(dependsOnId))
                 .forEach(taskDependencyRepository::delete);
     }
@@ -174,7 +131,29 @@ public class TaskService {
         return taskDependencyRepository.findByTaskId(taskId)
                 .stream()
                 .map(d -> toResponse(d.getDependsOn()))
-                .collect(java.util.stream.Collectors.toList());
+                .collect(Collectors.toList());
+    }
+
+    private void savePreferredDays(Task task, List<java.time.DayOfWeek> days) {
+        if (days == null) return;
+        for (var day : days) {
+            TaskPreferredDay tpd = new TaskPreferredDay();
+            tpd.setTask(task);
+            tpd.setDayOfWeek(day);
+            preferredDayRepository.save(tpd);
+        }
+    }
+
+    private void saveDependencies(Task task, List<Long> dependsOnIds) {
+        if (dependsOnIds == null) return;
+        for (Long dependsOnId : dependsOnIds) {
+            Task dependsOn = taskRepository.findById(dependsOnId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Task not found: " + dependsOnId));
+            TaskDependency dependency = new TaskDependency();
+            dependency.setTask(task);
+            dependency.setDependsOn(dependsOn);
+            taskDependencyRepository.save(dependency);
+        }
     }
 
     private TaskResponse toResponse(Task task) {
@@ -185,46 +164,42 @@ public class TaskService {
         response.setPriority(task.getPriority());
         response.setTotalMinutes(task.getTotalMinutes());
         response.setRemainingMinutes(task.getRemainingMinutes());
+        response.setSplittable(task.getSplittable());
         response.setCompleted(task.getCompleted());
         response.setCompletedDate(task.getCompletedDate());
-        response.setCycleType(task.getCycleType());
-        response.setCycleCount(task.getCycleCount());
-        response.setPreferredDay(task.getPreferredDay());
-        response.setPreferredTime(task.getPreferredTime());
-        response.setDurationMinutes(task.getDurationMinutes());
 
-        if (task.getType() == TaskType.WORKOUT) {
-            List<java.time.DayOfWeek> scheduledDays = workoutScheduledDayRepository
-                    .findAll()
+        if (task.getType() == TaskType.ONE_TIME) {
+            response.setDdl(task.getDdl());
+        } else if (task.getType() == TaskType.RECURRING) {
+            response.setCycleType(task.getCycleType());
+            response.setCycleCount(task.getCycleCount());
+            List<java.time.DayOfWeek> preferredDays = preferredDayRepository.findByTaskId(task.getId())
                     .stream()
-                    .filter(wsd -> wsd.getTask().getId().equals(task.getId()))
-                    .map(WorkoutScheduledDay::getDayOfWeek)
+                    .map(TaskPreferredDay::getDayOfWeek)
                     .collect(Collectors.toList());
-            response.setScheduledDays(scheduledDays);
+            response.setPreferredDays(preferredDays);
         }
 
-        if (task.getType() == TaskType.STUDY) {
-            List<TaskResponse> deps = taskDependencyRepository.findByTaskId(task.getId())
-                    .stream()
-                    .map(d -> {
-                        TaskResponse dep = new TaskResponse();
-                        dep.setId(d.getDependsOn().getId());
-                        dep.setTitle(d.getDependsOn().getTitle());
-                        return dep;
-                    })
-                    .collect(java.util.stream.Collectors.toList());
-            response.setDependencies(deps);
+        List<TaskResponse> deps = taskDependencyRepository.findByTaskId(task.getId())
+                .stream()
+                .map(d -> {
+                    TaskResponse dep = new TaskResponse();
+                    dep.setId(d.getDependsOn().getId());
+                    dep.setTitle(d.getDependsOn().getTitle());
+                    return dep;
+                })
+                .collect(Collectors.toList());
+        response.setDependencies(deps);
 
-            List<TaskResponse.DoneSession> doneSessions = allocationRepository.findByTaskId(task.getId())
-                    .stream()
-                    .filter(a -> Boolean.TRUE.equals(a.getDone()))
-                    .sorted(java.util.Comparator.comparing(a -> a.getDayEntry().getDate()))
-                    .map(a -> new TaskResponse.DoneSession(
-                            a.getDayEntry().getDate(),
-                            a.getActualMinutes()))
-                    .collect(java.util.stream.Collectors.toList());
-            response.setDoneSessions(doneSessions);
-        }
+        List<TaskResponse.DoneSession> doneSessions = allocationRepository.findByTaskId(task.getId())
+                .stream()
+                .filter(a -> Boolean.TRUE.equals(a.getDone()))
+                .sorted(java.util.Comparator.comparing(a -> a.getDayEntry().getDate()))
+                .map(a -> new TaskResponse.DoneSession(
+                        a.getDayEntry().getDate(),
+                        a.getActualMinutes()))
+                .collect(Collectors.toList());
+        response.setDoneSessions(doneSessions);
 
         return response;
     }

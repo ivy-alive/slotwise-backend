@@ -6,8 +6,7 @@ import com.slotwise.slotwise.enums.TaskType;
 import jakarta.persistence.*;
 import lombok.Data;
 
-import java.time.DayOfWeek;
-import java.time.LocalTime;
+import java.time.LocalDate;
 
 @Data
 @Entity
@@ -26,28 +25,20 @@ public class Task {
     @Enumerated(EnumType.STRING)
     private Priority priority;
 
-    // Study task fields
     private Integer totalMinutes;
     private Integer remainingMinutes;
+    private Boolean splittable;
     private Boolean completed;
+    private LocalDate completedDate;
+    private LocalDate lastDoneDate;
 
+    // ONE_TIME only
+    private LocalDate ddl;
+
+    // RECURRING only
     @Enumerated(EnumType.STRING)
     private CycleType cycleType;
 
     private Integer cycleCount;
-
-    @Enumerated(EnumType.STRING)
-    private DayOfWeek preferredDay;
-
-    private LocalTime preferredTime;
-
     private Integer cycleDebt = 0;
-
-    private java.time.LocalDate dueDate;
-    private java.time.LocalDate completedDate;
-    private java.time.LocalDate lastDoneDate;
-
-    // Workout task fields
-    private Integer durationMinutes;
-
 }

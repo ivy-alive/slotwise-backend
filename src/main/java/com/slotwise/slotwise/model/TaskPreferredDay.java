@@ -7,8 +7,8 @@ import java.time.DayOfWeek;
 
 @Data
 @Entity
-@Table(name = "workout_scheduled_days")
-public class WorkoutScheduledDay {
+@Table(name = "task_preferred_days")
+public class TaskPreferredDay {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

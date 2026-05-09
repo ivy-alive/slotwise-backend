@@ -99,7 +99,7 @@ public class DayEntryService {
 
         if (request.getDone()) {
             // Done
-            if (task.getType() == TaskType.STUDY) {
+            if (task.getType() == TaskType.ONE_TIME) {
                 task.setRemainingMinutes(
                         Math.max(task.getRemainingMinutes() - request.getActualMinutes(), 0));
                 task.setLastDoneDate(allocation.getDayEntry().getDate());

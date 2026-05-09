@@ -1,7 +1,6 @@
 package com.slotwise.slotwise.controller;
 
-import com.slotwise.slotwise.dto.request.StudyTaskRequest;
-import com.slotwise.slotwise.dto.request.WorkoutTaskRequest;
+import com.slotwise.slotwise.dto.request.TaskRequest;
 import com.slotwise.slotwise.dto.response.TaskResponse;
 import com.slotwise.slotwise.service.TaskService;
 import lombok.RequiredArgsConstructor;
@@ -16,24 +15,14 @@ public class TaskController {
 
     private final TaskService taskService;
 
-    @PostMapping("/study")
-    public TaskResponse createStudyTask(@RequestBody StudyTaskRequest request) {
-        return taskService.createStudyTask(request);
+    @PostMapping
+    public TaskResponse createTask(@RequestBody TaskRequest request) {
+        return taskService.createTask(request);
     }
 
-    @PostMapping("/workout")
-    public TaskResponse createWorkoutTask(@RequestBody WorkoutTaskRequest request) {
-        return taskService.createWorkoutTask(request);
-    }
-
-    @PutMapping("/study/{id}")
-    public TaskResponse updateStudyTask(@PathVariable Long id, @RequestBody StudyTaskRequest request) {
-        return taskService.updateStudyTask(id, request);
-    }
-
-    @PutMapping("/workout/{id}")
-    public TaskResponse updateWorkoutTask(@PathVariable Long id, @RequestBody WorkoutTaskRequest request) {
-        return taskService.updateWorkoutTask(id, request);
+    @PutMapping("/{id}")
+    public TaskResponse updateTask(@PathVariable Long id, @RequestBody TaskRequest request) {
+        return taskService.updateTask(id, request);
     }
 
     @GetMapping
