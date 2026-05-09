@@ -102,8 +102,10 @@ public class DayEntryService {
             if (task.getType() == TaskType.STUDY) {
                 task.setRemainingMinutes(
                         Math.max(task.getRemainingMinutes() - request.getActualMinutes(), 0));
+                task.setLastDoneDate(allocation.getDayEntry().getDate());
                 if (task.getRemainingMinutes() == 0) {
                     task.setCompleted(true);
+                    task.setCompletedDate(allocation.getDayEntry().getDate());
                 }
                 taskRepository.save(task);
             }

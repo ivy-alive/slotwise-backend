@@ -186,6 +186,7 @@ public class TaskService {
         response.setTotalMinutes(task.getTotalMinutes());
         response.setRemainingMinutes(task.getRemainingMinutes());
         response.setCompleted(task.getCompleted());
+        response.setCompletedDate(task.getCompletedDate());
         response.setCycleType(task.getCycleType());
         response.setCycleCount(task.getCycleCount());
         response.setPreferredDay(task.getPreferredDay());
@@ -213,6 +214,16 @@ public class TaskService {
                     })
                     .collect(java.util.stream.Collectors.toList());
             response.setDependencies(deps);
+
+            List<TaskResponse.DoneSession> doneSessions = allocationRepository.findByTaskId(task.getId())
+                    .stream()
+                    .filter(a -> Boolean.TRUE.equals(a.getDone()))
+                    .sorted(java.util.Comparator.comparing(a -> a.getDayEntry().getDate()))
+                    .map(a -> new TaskResponse.DoneSession(
+                            a.getDayEntry().getDate(),
+                            a.getActualMinutes()))
+                    .collect(java.util.stream.Collectors.toList());
+            response.setDoneSessions(doneSessions);
         }
 
         return response;

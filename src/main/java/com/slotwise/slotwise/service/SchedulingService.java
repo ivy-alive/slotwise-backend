@@ -36,9 +36,20 @@ public class SchedulingService {
         // Settle cycle debt from previous cycle before scheduling
         settleCycleDebt(date);
 
-        // Delete existing allocations for the day and regenerate
+        // Preserve done allocations; only delete undone ones
         List<DailyTaskAllocation> existing = allocationRepository.findByDayEntryId(dayEntry.getId());
-        allocationRepository.deleteAll(existing);
+        List<DailyTaskAllocation> doneAllocations = existing.stream()
+                .filter(a -> Boolean.TRUE.equals(a.getDone()))
+                .collect(Collectors.toList());
+        List<DailyTaskAllocation> undoneAllocations = existing.stream()
+                .filter(a -> !Boolean.TRUE.equals(a.getDone()))
+                .collect(Collectors.toList());
+        allocationRepository.deleteAll(undoneAllocations);
+
+        // Tasks already done today should not be re-scheduled
+        Set<Long> doneTaskIds = doneAllocations.stream()
+                .map(a -> a.getTask().getId())
+                .collect(Collectors.toSet());
 
         // Load free slots ordered by start time
         List<FreeSlot> freeSlots = freeSlotRepository.findByDayEntryIdOrderByStart(dayEntry.getId());
@@ -49,15 +60,27 @@ public class SchedulingService {
             slotPointers.put(slot, slot.getStart());
         }
 
+        // Advance pointers past time already consumed by done allocations
+        for (DailyTaskAllocation done : doneAllocations) {
+            allocationSlotRepository.findByDailyTaskAllocationId(done.getId())
+                    .forEach(as -> {
+                        LocalTime current = slotPointers.get(as.getFreeSlot());
+                        if (current != null && as.getEnd().isAfter(current)) {
+                            slotPointers.put(as.getFreeSlot(), as.getEnd());
+                        }
+                    });
+        }
+
         List<ScheduleResponse.AllocationResponse> allocationResponses = new ArrayList<>();
         List<ConflictResponse> conflictResponses = new ArrayList<>();
 
-        // 1. Schedule workout tasks for today
+        // 1. Schedule workout tasks for today (skip already done)
         DayOfWeek todayDow = date.getDayOfWeek();
         List<WorkoutScheduledDay> todayWorkouts = workoutScheduledDayRepository.findByDayOfWeek(todayDow);
 
         for (WorkoutScheduledDay wsd : todayWorkouts) {
             Task task = wsd.getTask();
+            if (doneTaskIds.contains(task.getId())) continue;
             int needed = task.getDurationMinutes();
             int available = calculateAvailableMinutes(slotPointers);
 
@@ -102,6 +125,7 @@ public class SchedulingService {
         List<Task> studyTasks = taskRepository.findByCompletedFalse()
                 .stream()
                 .filter(t -> t.getType() == TaskType.STUDY)
+                .filter(t -> !doneTaskIds.contains(t.getId()))
                 .filter(t -> {
                     // Skip tasks whose dependencies are not yet completed
                     List<TaskDependency> deps = taskDependencyRepository.findByTaskId(t.getId());
@@ -155,9 +179,35 @@ public class SchedulingService {
             allocationResponses.add(ar);
         }
 
+        // Prepend done allocations to the response so they always appear
+        List<ScheduleResponse.AllocationResponse> doneResponses = doneAllocations.stream()
+                .filter(a -> !Boolean.TRUE.equals(a.getConflict()))
+                .map(a -> {
+                    ScheduleResponse.AllocationResponse ar = new ScheduleResponse.AllocationResponse();
+                    ar.setAllocationId(a.getId());
+                    ar.setTaskTitle(a.getTask().getTitle());
+                    ar.setTaskType(a.getTask().getType());
+                    ar.setPlannedMinutes(a.getPlannedMinutes());
+                    ar.setActualMinutes(a.getActualMinutes());
+                    ar.setDone(true);
+                    ar.setSlots(allocationSlotRepository.findByDailyTaskAllocationId(a.getId())
+                            .stream()
+                            .map(s -> {
+                                ScheduleResponse.SlotResponse sr = new ScheduleResponse.SlotResponse();
+                                sr.setStart(s.getStart());
+                                sr.setEnd(s.getEnd());
+                                sr.setMinutes(s.getMinutes());
+                                return sr;
+                            })
+                            .collect(Collectors.toList()));
+                    return ar;
+                })
+                .collect(Collectors.toList());
+        doneResponses.addAll(allocationResponses);
+
         ScheduleResponse response = new ScheduleResponse();
         response.setDate(date);
-        response.setAllocations(allocationResponses);
+        response.setAllocations(doneResponses);
         response.setConflicts(conflictResponses);
         return response;
     }

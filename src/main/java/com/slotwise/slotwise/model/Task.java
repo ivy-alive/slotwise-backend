@@ -44,6 +44,8 @@ public class Task {
     private Integer cycleDebt = 0;
 
     private java.time.LocalDate dueDate;
+    private java.time.LocalDate completedDate;
+    private java.time.LocalDate lastDoneDate;
 
     // Workout task fields
     private Integer durationMinutes;
