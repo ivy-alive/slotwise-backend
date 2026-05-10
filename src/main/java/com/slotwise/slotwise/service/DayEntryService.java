@@ -84,21 +84,18 @@ public class DayEntryService {
         return freeSlotRepository.save(slot);
     }
 
-    public UpdateAllocationResult updateAllocation(Long allocationId, AllocationUpdateRequest request) {
+    public void updateAllocation(Long allocationId, AllocationUpdateRequest request) {
         DailyTaskAllocation allocation = allocationRepository.findById(allocationId)
                 .orElseThrow(() -> new ResourceNotFoundException("Allocation not found: " + allocationId));
 
         Task task = allocation.getTask();
-        boolean shouldReschedule = false;
-        boolean askReschedule = false;
-        int minutesFreed = 0;
 
         allocation.setDone(request.getDone());
         allocation.setActualMinutes(request.getActualMinutes());
+        allocation.setMemo(request.getMemo());
         allocationRepository.save(allocation);
 
         if (request.getDone()) {
-            // Done
             if (task.getType() == TaskType.ONE_TIME) {
                 int newConsumed = Math.min(
                         task.getConsumedMinutes() + request.getActualMinutes(),
@@ -111,25 +108,13 @@ public class DayEntryService {
                 }
                 taskRepository.save(task);
             }
-
-            int diff = allocation.getPlannedMinutes() - request.getActualMinutes();
-            if (diff > 0) {
-                askReschedule = true;
-                minutesFreed = diff;
-            } else if (diff < 0) {
-                shouldReschedule = true;
-            }
         } else {
-            // Not done — update consumed from manual remaining override or minutes spent
             int newConsumed = request.getNewRemaining() != null
                     ? Math.max(task.getTotalMinutes() - request.getNewRemaining(), 0)
                     : Math.min(task.getConsumedMinutes() + request.getActualMinutes(), task.getTotalMinutes());
             task.setConsumedMinutes(newConsumed);
             taskRepository.save(task);
-            shouldReschedule = true;
         }
-
-        return new UpdateAllocationResult(shouldReschedule, askReschedule, minutesFreed);
     }
 
     private DayEntryResponse toResponse(DayEntry dayEntry) {
@@ -153,9 +138,4 @@ public class DayEntryService {
         return response;
     }
 
-    public record UpdateAllocationResult(
-            boolean shouldReschedule,
-            boolean askReschedule,
-            int minutesFreed) {
-    }
 }

@@ -38,5 +38,7 @@ public class TaskResponse {
     public static class DoneSession {
         private LocalDate date;
         private Integer actualMinutes;
+        private String memo;
+        private Boolean done;
     }
 }

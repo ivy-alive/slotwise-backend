@@ -1,5 +1,6 @@
 package com.slotwise.slotwise.service;
 
+import com.slotwise.slotwise.dto.request.TaskProgressRequest;
 import com.slotwise.slotwise.dto.request.TaskRequest;
 import com.slotwise.slotwise.dto.response.TaskResponse;
 import com.slotwise.slotwise.enums.TaskType;
@@ -90,6 +91,29 @@ public class TaskService {
     public TaskResponse getTaskById(Long id) {
         Task task = taskRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Task not found: " + id));
+        return toResponse(task);
+    }
+
+    public TaskResponse updateProgress(Long id, TaskProgressRequest request) {
+        Task task = taskRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Task not found: " + id));
+
+        if (Boolean.TRUE.equals(request.getCompleted())) {
+            task.setConsumedMinutes(task.getTotalMinutes());
+            task.setCompleted(true);
+            task.setCompletedDate(java.time.LocalDate.now());
+        } else {
+            if (Boolean.FALSE.equals(request.getCompleted())) {
+                task.setCompleted(false);
+                task.setCompletedDate(null);
+            }
+            if (request.getConsumedMinutes() != null) {
+                task.setConsumedMinutes(
+                        Math.min(Math.max(request.getConsumedMinutes(), 0), task.getTotalMinutes()));
+            }
+        }
+
+        taskRepository.save(task);
         return toResponse(task);
     }
 
@@ -194,11 +218,13 @@ public class TaskService {
 
         List<TaskResponse.DoneSession> doneSessions = allocationRepository.findByTaskId(task.getId())
                 .stream()
-                .filter(a -> Boolean.TRUE.equals(a.getDone()))
+                .filter(a -> a.getDone() != null)
                 .sorted(java.util.Comparator.comparing(a -> a.getDayEntry().getDate()))
                 .map(a -> new TaskResponse.DoneSession(
                         a.getDayEntry().getDate(),
-                        a.getActualMinutes()))
+                        a.getActualMinutes(),
+                        a.getMemo(),
+                        a.getDone()))
                 .collect(Collectors.toList());
         response.setDoneSessions(doneSessions);
 

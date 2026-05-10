@@ -59,6 +59,7 @@ Users can create, edit, and delete two types of tasks:
 - Splittable: whether the task can be spread across multiple days/slots
 - Deadline (optional): hard cutoff; system boosts priority when ≤ 3 days away
 - Depends on: other tasks that must be completed first; blocks scheduling until met
+- Status and remaining minutes can be edited from the task list
 
 **Recurring Tasks**
 - Title, priority (Must / Normal), duration per session
@@ -81,23 +82,23 @@ Users can create, edit, and delete two types of tasks:
     - Recurring tasks only appear here if behind on their cycle quota
     - Splittable tasks fill available time; non-splittable tasks require a single block
     - Tasks with unmet dependencies are skipped
-- Free slots can be added, edited, and deleted; schedule updates automatically
+- Free slots can be added, edited, and deleted
 - Calendar shows public holidays (via Nager.Date API) and weekends in red
+- Week overview shows all 7 days with task summaries; a single Update button re-schedules all days in the week that have entries
 
 ### Req 3 — Actual Time Logging
 
-After completing (or attempting) a task each day, the user logs progress:
+After completing (or attempting) a task each day, the user logs progress via an inline form:
 
 **Done:**
-- User marks the allocation as Done and enters actual minutes used
-- For one-time tasks: actual minutes are deducted from remaining minutes
-- If actual < planned: user is asked if they want to reschedule freed time
-- If actual > planned: system auto-reschedules
+- Mark the allocation as Done, enter actual minutes used, add an optional memo
+- Consumed minutes are incremented on the task; task is marked completed when fully consumed
 
 **Not Done:**
-- User marks as Not Done and enters how many minutes they spent
-- System recalculates remaining minutes (can be manually adjusted)
-- Schedule is automatically regenerated
+- Mark as Not Done, enter minutes spent, optionally override the remaining minutes, add a memo
+- Consumed minutes are updated accordingly
+
+Logged sessions (both done and not done) appear on the Tasks page with date, minutes, and memo.
 
 ### Req 4 — Cycle Tracking & Debt
 
@@ -119,10 +120,11 @@ erDiagram
         String type "ONE_TIME | RECURRING"
         String priority "HIGH | LOW"
         Integer totalMinutes
-        Integer remainingMinutes
+        Integer consumedMinutes
         Boolean splittable
         Boolean completed
         Date completedDate
+        Date lastDoneDate
         Date ddl "ONE_TIME only"
         String cycleType "WEEKLY | MONTHLY — RECURRING only"
         Integer cycleCount "RECURRING only"
@@ -161,6 +163,7 @@ erDiagram
         Integer actualMinutes
         Boolean done
         Boolean conflict
+        String memo
     }
 
     allocation_slots {
@@ -190,6 +193,7 @@ erDiagram
 |---|---|---|
 | POST | /tasks | Create task |
 | PUT | /tasks/{id} | Update task |
+| PUT | /tasks/{id}/progress | Update task progress (status / consumed minutes) |
 | GET | /tasks | Get all tasks |
 | GET | /tasks/{id} | Get task by ID |
 | DELETE | /tasks/{id} | Delete task |
@@ -201,9 +205,9 @@ erDiagram
 | POST | /day-entries/{date}/free-slots | Add free slot |
 | PUT | /day-entries/{date}/free-slots/{id} | Update free slot |
 | DELETE | /day-entries/{date}/free-slots/{id} | Delete free slot |
-| POST | /day-entries/{date}/schedule | Generate schedule |
+| POST | /day-entries/{date}/schedule | Generate / update schedule |
 | GET | /day-entries/{date}/schedule | Get existing schedule |
-| PUT | /day-entries/{date}/allocations/{id} | Log actual time |
+| PUT | /day-entries/{date}/allocations/{id} | Log actual time and memo |
 
 ---
 
@@ -234,5 +238,4 @@ slotwise-web/
 ## TODO
 
 - [ ] Cycle progress view: show per-task cycle completion status in the UI
-- [ ] Task ordering: allow manual reordering within the same priority level
 - [ ] Stats page: rebuild for new task model (recurring task completion history)

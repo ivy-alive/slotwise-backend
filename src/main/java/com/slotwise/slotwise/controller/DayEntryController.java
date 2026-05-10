@@ -6,7 +6,6 @@ import com.slotwise.slotwise.dto.response.DayEntryResponse;
 import com.slotwise.slotwise.dto.response.ScheduleResponse;
 import com.slotwise.slotwise.model.FreeSlot;
 import com.slotwise.slotwise.service.DayEntryService;
-import com.slotwise.slotwise.service.DayEntryService.UpdateAllocationResult;
 import com.slotwise.slotwise.service.SchedulingService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
@@ -35,11 +34,11 @@ public class DayEntryController {
     }
 
     @PutMapping("/{date}/allocations/{allocationId}")
-    public UpdateAllocationResult updateAllocation(
+    public void updateAllocation(
             @PathVariable String date,
             @PathVariable Long allocationId,
             @RequestBody AllocationUpdateRequest request) {
-        return dayEntryService.updateAllocation(allocationId, request);
+        dayEntryService.updateAllocation(allocationId, request);
     }
 
     @PostMapping("/{date}/free-slots")

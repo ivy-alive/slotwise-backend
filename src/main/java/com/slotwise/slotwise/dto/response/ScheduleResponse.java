@@ -21,6 +21,10 @@ public class ScheduleResponse {
         private Integer plannedMinutes;
         private Integer actualMinutes;
         private Boolean done;
+        private String memo;
+        private Integer consumedMinutes;
+        private Integer totalMinutes;
+        private LocalDate ddl;
         private List<SlotResponse> slots;
     }
 

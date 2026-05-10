@@ -37,15 +37,15 @@ public class SchedulingService {
         settleCycleDebt(date);
 
         List<DailyTaskAllocation> existing = allocationRepository.findByDayEntryId(dayEntry.getId());
-        List<DailyTaskAllocation> doneAllocations = existing.stream()
-                .filter(a -> Boolean.TRUE.equals(a.getDone()))
+        List<DailyTaskAllocation> loggedAllocations = existing.stream()
+                .filter(a -> a.getDone() != null)
                 .collect(Collectors.toList());
-        List<DailyTaskAllocation> undoneAllocations = existing.stream()
-                .filter(a -> !Boolean.TRUE.equals(a.getDone()))
+        List<DailyTaskAllocation> unloggedAllocations = existing.stream()
+                .filter(a -> a.getDone() == null)
                 .collect(Collectors.toList());
-        allocationRepository.deleteAll(undoneAllocations);
+        allocationRepository.deleteAll(unloggedAllocations);
 
-        Set<Long> doneTaskIds = doneAllocations.stream()
+        Set<Long> loggedTaskIds = loggedAllocations.stream()
                 .map(a -> a.getTask().getId())
                 .collect(Collectors.toSet());
 
@@ -55,8 +55,8 @@ public class SchedulingService {
             slotPointers.put(slot, slot.getStart());
         }
 
-        for (DailyTaskAllocation done : doneAllocations) {
-            allocationSlotRepository.findByDailyTaskAllocationId(done.getId())
+        for (DailyTaskAllocation logged : loggedAllocations) {
+            allocationSlotRepository.findByDailyTaskAllocationId(logged.getId())
                     .forEach(as -> {
                         LocalTime current = slotPointers.get(as.getFreeSlot());
                         if (current != null && as.getEnd().isAfter(current)) {
@@ -76,7 +76,7 @@ public class SchedulingService {
         List<Task> preferredTodayTasks = todayPreferred.stream()
                 .map(TaskPreferredDay::getTask)
                 .filter(t -> t.getType() == TaskType.RECURRING)
-                .filter(t -> !doneTaskIds.contains(t.getId()))
+                .filter(t -> !loggedTaskIds.contains(t.getId()))
                 .sorted(Comparator.comparingInt(t -> t.getPriority() == Priority.HIGH ? 0 : 1))
                 .collect(Collectors.toList());
 
@@ -94,7 +94,7 @@ public class SchedulingService {
             allocation.setTask(task);
             allocation.setPlannedMinutes(needed);
             allocation.setActualMinutes(0);
-            allocation.setDone(false);
+            allocation.setDone(null);
 
             if (!canSchedule) {
                 if (task.getPriority() == Priority.HIGH) {
@@ -125,7 +125,7 @@ public class SchedulingService {
         // Step 2: All other incomplete tasks (ONE_TIME + RECURRING not yet handled today)
         List<Task> remainingTasks = taskRepository.findByCompletedFalse()
                 .stream()
-                .filter(t -> !doneTaskIds.contains(t.getId()))
+                .filter(t -> !loggedTaskIds.contains(t.getId()))
                 .filter(t -> !handledRecurringIds.contains(t.getId()))
                 .filter(t -> {
                     List<TaskDependency> deps = taskDependencyRepository.findByTaskId(t.getId());
@@ -170,7 +170,7 @@ public class SchedulingService {
             allocation.setTask(task);
             allocation.setPlannedMinutes(minutesToSchedule);
             allocation.setActualMinutes(0);
-            allocation.setDone(false);
+            allocation.setDone(null);
             allocation.setConflict(false);
             allocationRepository.save(allocation);
 
@@ -181,8 +181,8 @@ public class SchedulingService {
             allocationResponses.add(buildAllocationResponse(allocation, task, slotResponses));
         }
 
-        // Prepend done allocations to response
-        List<ScheduleResponse.AllocationResponse> doneResponses = doneAllocations.stream()
+        // Prepend logged allocations to response
+        List<ScheduleResponse.AllocationResponse> doneResponses = loggedAllocations.stream()
                 .filter(a -> !Boolean.TRUE.equals(a.getConflict()))
                 .map(a -> {
                     ScheduleResponse.AllocationResponse ar = new ScheduleResponse.AllocationResponse();
@@ -191,7 +191,11 @@ public class SchedulingService {
                     ar.setTaskType(a.getTask().getType());
                     ar.setPlannedMinutes(a.getPlannedMinutes());
                     ar.setActualMinutes(a.getActualMinutes());
-                    ar.setDone(true);
+                    ar.setDone(a.getDone());
+                    ar.setMemo(a.getMemo());
+                    ar.setConsumedMinutes(a.getTask().getConsumedMinutes());
+                    ar.setTotalMinutes(a.getTask().getTotalMinutes());
+                    ar.setDdl(a.getTask().getDdl());
                     ar.setSlots(allocationSlotRepository.findByDailyTaskAllocationId(a.getId())
                             .stream()
                             .map(s -> {
@@ -407,7 +411,10 @@ public class SchedulingService {
         ar.setTaskType(task.getType());
         ar.setPlannedMinutes(allocation.getPlannedMinutes());
         ar.setActualMinutes(0);
-        ar.setDone(false);
+        ar.setDone(null);
+        ar.setConsumedMinutes(task.getConsumedMinutes());
+        ar.setTotalMinutes(task.getTotalMinutes());
+        ar.setDdl(task.getDdl());
         ar.setSlots(slots);
         return ar;
     }
@@ -429,6 +436,10 @@ public class SchedulingService {
                     ar.setPlannedMinutes(a.getPlannedMinutes());
                     ar.setActualMinutes(a.getActualMinutes());
                     ar.setDone(a.getDone());
+                    ar.setMemo(a.getMemo());
+                    ar.setConsumedMinutes(a.getTask().getConsumedMinutes());
+                    ar.setTotalMinutes(a.getTask().getTotalMinutes());
+                    ar.setDdl(a.getTask().getDdl());
                     ar.setSlots(allocationSlotRepository.findByDailyTaskAllocationId(a.getId())
                             .stream()
                             .map(s -> {

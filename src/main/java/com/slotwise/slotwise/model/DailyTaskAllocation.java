@@ -27,6 +27,9 @@ public class DailyTaskAllocation {
     private Boolean done;
     private Boolean conflict;
 
+    @Column(length = 1000)
+    private String memo;
+
     @OneToMany(mappedBy = "dailyTaskAllocation", cascade = CascadeType.ALL)
     private List<AllocationSlot> allocationSlots;
 }

@@ -1,5 +1,6 @@
 package com.slotwise.slotwise.controller;
 
+import com.slotwise.slotwise.dto.request.TaskProgressRequest;
 import com.slotwise.slotwise.dto.request.TaskRequest;
 import com.slotwise.slotwise.dto.response.TaskResponse;
 import com.slotwise.slotwise.service.TaskService;
@@ -33,6 +34,11 @@ public class TaskController {
     @GetMapping("/{id}")
     public TaskResponse getTaskById(@PathVariable Long id) {
         return taskService.getTaskById(id);
+    }
+
+    @PutMapping("/{id}/progress")
+    public TaskResponse updateProgress(@PathVariable Long id, @RequestBody TaskProgressRequest request) {
+        return taskService.updateProgress(id, request);
     }
 
     @DeleteMapping("/{id}")
