@@ -33,7 +33,7 @@ public class TaskService {
         task.setType(request.getType());
         task.setPriority(request.getPriority());
         task.setTotalMinutes(request.getTotalMinutes());
-        task.setRemainingMinutes(request.getTotalMinutes());
+        task.setConsumedMinutes(0);
         task.setSplittable(request.getSplittable());
         task.setCompleted(false);
 
@@ -59,8 +59,9 @@ public class TaskService {
 
         task.setTitle(request.getTitle());
         task.setPriority(request.getPriority());
-        task.setTotalMinutes(request.getTotalMinutes());
         task.setSplittable(request.getSplittable());
+
+        task.setTotalMinutes(request.getTotalMinutes());
 
         if (task.getType() == TaskType.ONE_TIME) {
             task.setDdl(request.getDdl());
@@ -163,7 +164,7 @@ public class TaskService {
         response.setType(task.getType());
         response.setPriority(task.getPriority());
         response.setTotalMinutes(task.getTotalMinutes());
-        response.setRemainingMinutes(task.getRemainingMinutes());
+        response.setRemainingMinutes(task.getTotalMinutes() - task.getConsumedMinutes());
         response.setSplittable(task.getSplittable());
         response.setCompleted(task.getCompleted());
         response.setCompletedDate(task.getCompletedDate());

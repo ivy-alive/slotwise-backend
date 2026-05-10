@@ -26,13 +26,20 @@ import static org.mockito.Mockito.*;
 @ExtendWith(MockitoExtension.class)
 class SchedulingServiceTest {
 
-    @Mock private DayEntryRepository dayEntryRepository;
-    @Mock private FreeSlotRepository freeSlotRepository;
-    @Mock private TaskRepository taskRepository;
-    @Mock private TaskPreferredDayRepository preferredDayRepository;
-    @Mock private DailyTaskAllocationRepository allocationRepository;
-    @Mock private AllocationSlotRepository allocationSlotRepository;
-    @Mock private TaskDependencyRepository taskDependencyRepository;
+    @Mock
+    private DayEntryRepository dayEntryRepository;
+    @Mock
+    private FreeSlotRepository freeSlotRepository;
+    @Mock
+    private TaskRepository taskRepository;
+    @Mock
+    private TaskPreferredDayRepository preferredDayRepository;
+    @Mock
+    private DailyTaskAllocationRepository allocationRepository;
+    @Mock
+    private AllocationSlotRepository allocationSlotRepository;
+    @Mock
+    private TaskDependencyRepository taskDependencyRepository;
 
     @InjectMocks
     private SchedulingService schedulingService;
@@ -164,7 +171,7 @@ class SchedulingServiceTest {
         oneTimeTask.setType(TaskType.ONE_TIME);
         oneTimeTask.setPriority(Priority.HIGH);
         oneTimeTask.setTotalMinutes(180);
-        oneTimeTask.setRemainingMinutes(180);
+        oneTimeTask.setConsumedMinutes(0);
         oneTimeTask.setSplittable(true); // can split across slots
         oneTimeTask.setCompleted(false);
 
@@ -205,7 +212,7 @@ class SchedulingServiceTest {
         oneTimeTask.setType(TaskType.ONE_TIME);
         oneTimeTask.setPriority(Priority.HIGH);
         oneTimeTask.setTotalMinutes(90);
-        oneTimeTask.setRemainingMinutes(90);
+        oneTimeTask.setConsumedMinutes(0);
         oneTimeTask.setSplittable(false); // must fit in one block
         oneTimeTask.setCompleted(false);
 

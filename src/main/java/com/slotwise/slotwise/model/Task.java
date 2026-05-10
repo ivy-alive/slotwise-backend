@@ -26,7 +26,7 @@ public class Task {
     private Priority priority;
 
     private Integer totalMinutes;
-    private Integer remainingMinutes;
+    private Integer consumedMinutes = 0;
     private Boolean splittable;
     private Boolean completed;
     private LocalDate completedDate;

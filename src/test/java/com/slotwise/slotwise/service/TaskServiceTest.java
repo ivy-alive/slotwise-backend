@@ -23,7 +23,6 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -55,7 +54,7 @@ class TaskServiceTest {
         oneTimeTask.setType(TaskType.ONE_TIME);
         oneTimeTask.setPriority(Priority.HIGH);
         oneTimeTask.setTotalMinutes(180);
-        oneTimeTask.setRemainingMinutes(180);
+        oneTimeTask.setConsumedMinutes(0);
         oneTimeTask.setCompleted(false);
         oneTimeTask.setSplittable(true);
 
@@ -65,7 +64,7 @@ class TaskServiceTest {
         recurringTask.setType(TaskType.RECURRING);
         recurringTask.setPriority(Priority.HIGH);
         recurringTask.setTotalMinutes(45);
-        recurringTask.setRemainingMinutes(45);
+        recurringTask.setConsumedMinutes(0);
         recurringTask.setCompleted(false);
         recurringTask.setSplittable(false);
         recurringTask.setCycleType(CycleType.WEEKLY);
@@ -73,7 +72,7 @@ class TaskServiceTest {
     }
 
     @Test
-    void createTask_oneTime_shouldSetRemainingMinutesToTotal() {
+    void createTask_oneTime_shouldSetConsumedMinutesToZeroAndRemainingToTotal() {
         TaskRequest request = new TaskRequest();
         request.setTitle("Read Spring Docs");
         request.setType(TaskType.ONE_TIME);

@@ -100,10 +100,12 @@ public class DayEntryService {
         if (request.getDone()) {
             // Done
             if (task.getType() == TaskType.ONE_TIME) {
-                task.setRemainingMinutes(
-                        Math.max(task.getRemainingMinutes() - request.getActualMinutes(), 0));
+                int newConsumed = Math.min(
+                        task.getConsumedMinutes() + request.getActualMinutes(),
+                        task.getTotalMinutes());
+                task.setConsumedMinutes(newConsumed);
                 task.setLastDoneDate(allocation.getDayEntry().getDate());
-                if (task.getRemainingMinutes() == 0) {
+                if (newConsumed >= task.getTotalMinutes()) {
                     task.setCompleted(true);
                     task.setCompletedDate(allocation.getDayEntry().getDate());
                 }
@@ -112,19 +114,17 @@ public class DayEntryService {
 
             int diff = allocation.getPlannedMinutes() - request.getActualMinutes();
             if (diff > 0) {
-                // Finished faster than planned — ask user if they want to reschedule
                 askReschedule = true;
                 minutesFreed = diff;
             } else if (diff < 0) {
-                // Took longer than planned — auto reschedule
                 shouldReschedule = true;
             }
         } else {
-            // Not done — update remaining minutes
-            int newRemaining = request.getNewRemaining() != null
-                    ? request.getNewRemaining()
-                    : Math.max(task.getRemainingMinutes() - request.getActualMinutes(), 0);
-            task.setRemainingMinutes(newRemaining);
+            // Not done — update consumed from manual remaining override or minutes spent
+            int newConsumed = request.getNewRemaining() != null
+                    ? Math.max(task.getTotalMinutes() - request.getNewRemaining(), 0)
+                    : Math.min(task.getConsumedMinutes() + request.getActualMinutes(), task.getTotalMinutes());
+            task.setConsumedMinutes(newConsumed);
             taskRepository.save(task);
             shouldReschedule = true;
         }

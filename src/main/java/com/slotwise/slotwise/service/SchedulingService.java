@@ -149,7 +149,7 @@ public class SchedulingService {
                 if (isOnTrackForCycle(task, date)) continue;
                 minutesToSchedule = task.getTotalMinutes() != null ? task.getTotalMinutes() : 0;
             } else {
-                minutesToSchedule = task.getRemainingMinutes() != null ? task.getRemainingMinutes() : 0;
+                minutesToSchedule = task.getTotalMinutes() - task.getConsumedMinutes();
             }
 
             if (minutesToSchedule <= 0) continue;
