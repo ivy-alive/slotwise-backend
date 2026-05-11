@@ -17,6 +17,8 @@ public class DayEntry {
 
     private LocalDate date;
 
+    private boolean closed = false;
+
     @OneToMany(mappedBy = "dayEntry", cascade = CascadeType.ALL)
     private List<FreeSlot> freeSlots;
 

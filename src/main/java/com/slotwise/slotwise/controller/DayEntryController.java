@@ -2,6 +2,7 @@ package com.slotwise.slotwise.controller;
 
 import com.slotwise.slotwise.dto.request.AllocationUpdateRequest;
 import com.slotwise.slotwise.dto.request.DayEntryRequest;
+import com.slotwise.slotwise.dto.response.CallItADayResponse;
 import com.slotwise.slotwise.dto.response.DayEntryResponse;
 import com.slotwise.slotwise.dto.response.ScheduleResponse;
 import com.slotwise.slotwise.model.FreeSlot;
@@ -41,6 +42,13 @@ public class DayEntryController {
         dayEntryService.updateAllocation(allocationId, request);
     }
 
+    @DeleteMapping("/{date}/allocations/{allocationId}/log")
+    public void deleteAllocationLog(
+            @PathVariable String date,
+            @PathVariable Long allocationId) {
+        dayEntryService.deleteAllocationLog(allocationId);
+    }
+
     @PostMapping("/{date}/free-slots")
     public FreeSlot addFreeSlot(@PathVariable String date,
             @RequestBody DayEntryRequest.FreeSlotRequest request) {
@@ -63,5 +71,15 @@ public class DayEntryController {
     @GetMapping("/{date}/schedule")
     public ScheduleResponse getSchedule(@PathVariable String date) {
         return schedulingService.getSchedule(date);
+    }
+
+    @PostMapping("/{date}/call-it-a-day")
+    public CallItADayResponse callItADay(@PathVariable String date) {
+        return dayEntryService.callItADay(date);
+    }
+
+    @PostMapping("/{date}/reopen")
+    public void reopenDay(@PathVariable String date) {
+        dayEntryService.reopenDay(date);
     }
 }

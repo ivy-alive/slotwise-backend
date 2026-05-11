@@ -10,6 +10,7 @@ import java.util.List;
 public class DayEntryResponse {
     private Long id;
     private LocalDate date;
+    private boolean closed;
     private List<FreeSlotResponse> freeSlots;
 
     @Data

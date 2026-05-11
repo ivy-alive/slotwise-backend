@@ -30,9 +30,18 @@ public class SchedulingService {
     private final TaskDependencyRepository taskDependencyRepository;
 
     public ScheduleResponse schedule(String dateStr) {
+        return schedule(dateStr, java.util.Collections.emptySet());
+    }
+
+    public ScheduleResponse schedule(String dateStr, java.util.Set<Long> forceTaskIds) {
         LocalDate date = LocalDate.parse(dateStr);
         DayEntry dayEntry = dayEntryRepository.findByDate(date)
                 .orElseThrow(() -> new ResourceNotFoundException("DayEntry not found: " + dateStr));
+
+        // Closed days are immutable — return existing schedule without re-running the algorithm
+        if (dayEntry.isClosed()) {
+            return getSchedule(dateStr);
+        }
 
         settleCycleDebt(date);
 
@@ -40,12 +49,18 @@ public class SchedulingService {
         List<DailyTaskAllocation> loggedAllocations = existing.stream()
                 .filter(a -> a.getDone() != null)
                 .collect(Collectors.toList());
+        List<DailyTaskAllocation> carriedOverAllocations = existing.stream()
+                .filter(a -> a.getDone() == null && a.isCarriedOver())
+                .collect(Collectors.toList());
+        // Only delete truly fresh unscheduled allocations — not carried-over ones
         List<DailyTaskAllocation> unloggedAllocations = existing.stream()
-                .filter(a -> a.getDone() == null)
+                .filter(a -> a.getDone() == null && !a.isCarriedOver())
                 .collect(Collectors.toList());
         allocationRepository.deleteAll(unloggedAllocations);
 
-        Set<Long> loggedTaskIds = loggedAllocations.stream()
+        // Both logged and carried-over tasks are already accounted for — don't re-schedule them
+        Set<Long> protectedTaskIds = java.util.stream.Stream
+                .concat(loggedAllocations.stream(), carriedOverAllocations.stream())
                 .map(a -> a.getTask().getId())
                 .collect(Collectors.toSet());
 
@@ -55,14 +70,30 @@ public class SchedulingService {
             slotPointers.put(slot, slot.getStart());
         }
 
-        for (DailyTaskAllocation logged : loggedAllocations) {
-            allocationSlotRepository.findByDailyTaskAllocationId(logged.getId())
-                    .forEach(as -> {
-                        LocalTime current = slotPointers.get(as.getFreeSlot());
-                        if (current != null && as.getEnd().isAfter(current)) {
-                            slotPointers.put(as.getFreeSlot(), as.getEnd());
-                        }
-                    });
+        // Collect all allocationSlots from logged and carried-over allocations, grouped by FreeSlot id.
+        // Used both to initialise slot pointers (contiguous-only advance) and to block new tasks from
+        // writing into time already occupied by preserved allocations.
+        Map<Long, List<AllocationSlot>> reservedBySlot = new LinkedHashMap<>();
+        java.util.stream.Stream.concat(loggedAllocations.stream(), carriedOverAllocations.stream())
+                .forEach(alloc -> allocationSlotRepository.findByDailyTaskAllocationId(alloc.getId())
+                        .forEach(as -> reservedBySlot
+                                .computeIfAbsent(as.getFreeSlot().getId(), k -> new ArrayList<>())
+                                .add(as)));
+
+        for (FreeSlot slot : freeSlots) {
+            List<AllocationSlot> used = reservedBySlot.getOrDefault(slot.getId(), Collections.emptyList());
+            used.sort(Comparator.comparing(AllocationSlot::getStart));
+            LocalTime pointer = slot.getStart();
+            for (AllocationSlot as : used) {
+                if (!as.getStart().isAfter(pointer)) {
+                    if (as.getEnd().isAfter(pointer)) {
+                        pointer = as.getEnd();
+                    }
+                } else {
+                    break; // gap before this block — earlier time is still free
+                }
+            }
+            slotPointers.put(slot, pointer);
         }
 
         List<ScheduleResponse.AllocationResponse> allocationResponses = new ArrayList<>();
@@ -76,18 +107,19 @@ public class SchedulingService {
         List<Task> preferredTodayTasks = todayPreferred.stream()
                 .map(TaskPreferredDay::getTask)
                 .filter(t -> t.getType() == TaskType.RECURRING)
-                .filter(t -> !loggedTaskIds.contains(t.getId()))
+                .filter(t -> !protectedTaskIds.contains(t.getId()))
                 .sorted(Comparator.comparingInt(t -> t.getPriority() == Priority.HIGH ? 0 : 1))
                 .collect(Collectors.toList());
 
         for (Task task : preferredTodayTasks) {
             handledRecurringIds.add(task.getId());
             int needed = task.getTotalMinutes() != null ? task.getTotalMinutes() : 0;
-            if (needed <= 0) continue;
+            if (needed <= 0)
+                continue;
 
             boolean canSchedule = Boolean.FALSE.equals(task.getSplittable())
-                    ? canFitContiguously(slotPointers, needed)
-                    : calculateAvailableMinutes(slotPointers) >= needed;
+                    ? canFitContiguously(slotPointers, reservedBySlot, needed)
+                    : calculateAvailableMinutes(slotPointers, reservedBySlot) >= needed;
 
             DailyTaskAllocation allocation = new DailyTaskAllocation();
             allocation.setDayEntry(dayEntry);
@@ -105,7 +137,7 @@ public class SchedulingService {
                     conflict.setAllocationId(allocation.getId());
                     conflict.setTaskTitle(task.getTitle());
                     conflict.setDurationMinutes(needed);
-                    conflict.setAvailableMinutes(calculateAvailableMinutes(slotPointers));
+                    conflict.setAvailableMinutes(calculateAvailableMinutes(slotPointers, reservedBySlot));
                     conflict.setReason("Needs " + needed + " min but not enough time available");
                     conflictResponses.add(conflict);
                 }
@@ -114,18 +146,19 @@ public class SchedulingService {
                 allocation.setConflict(false);
                 allocationRepository.save(allocation);
                 List<ScheduleResponse.SlotResponse> slotResponses = Boolean.FALSE.equals(task.getSplittable())
-                        ? fillSlotsContiguously(allocation, needed, slotPointers)
-                        : fillSlots(allocation, needed, slotPointers);
+                        ? fillSlotsContiguously(allocation, needed, slotPointers, reservedBySlot)
+                        : fillSlots(allocation, needed, slotPointers, reservedBySlot);
 
                 ScheduleResponse.AllocationResponse ar = buildAllocationResponse(allocation, task, slotResponses);
                 allocationResponses.add(ar);
             }
         }
 
-        // Step 2: All other incomplete tasks (ONE_TIME + RECURRING not yet handled today)
+        // Step 2: All other incomplete tasks (ONE_TIME + RECURRING not yet handled
+        // today)
         List<Task> remainingTasks = taskRepository.findByCompletedFalse()
                 .stream()
-                .filter(t -> !loggedTaskIds.contains(t.getId()))
+                .filter(t -> !protectedTaskIds.contains(t.getId()))
                 .filter(t -> !handledRecurringIds.contains(t.getId()))
                 .filter(t -> {
                     List<TaskDependency> deps = taskDependencyRepository.findByTaskId(t.getId());
@@ -133,10 +166,17 @@ public class SchedulingService {
                             .allMatch(d -> Boolean.TRUE.equals(d.getDependsOn().getCompleted()));
                 })
                 .sorted(Comparator.comparingInt((Task t) -> {
-                    if (t.getType() == TaskType.RECURRING && !isOnTrackForCycle(t, date)) return -1;
                     if (t.getType() == TaskType.ONE_TIME && t.getDdl() != null) {
                         long days = java.time.temporal.ChronoUnit.DAYS.between(date, t.getDdl());
-                        if (days <= 3 && days >= 0) return 0;
+                        if (days < 0)
+                            return -2;
+                    }
+                    if (t.getType() == TaskType.RECURRING && !isOnTrackForCycle(t, date))
+                        return -1;
+                    if (t.getType() == TaskType.ONE_TIME && t.getDdl() != null) {
+                        long days = java.time.temporal.ChronoUnit.DAYS.between(date, t.getDdl());
+                        if (days <= 3)
+                            return 0;
                     }
                     return t.getPriority() == Priority.HIGH ? 1 : 2;
                 }))
@@ -145,22 +185,27 @@ public class SchedulingService {
         for (Task task : remainingTasks) {
             int minutesToSchedule;
             if (task.getType() == TaskType.RECURRING) {
-                // For RECURRING tasks in step 2, only schedule if behind on cycle
-                if (isOnTrackForCycle(task, date)) continue;
+                // For RECURRING tasks in step 2, only schedule if behind on cycle or forced by
+                // carry-over
+                if (!forceTaskIds.contains(task.getId()) && isOnTrackForCycle(task, date))
+                    continue;
                 minutesToSchedule = task.getTotalMinutes() != null ? task.getTotalMinutes() : 0;
             } else {
                 minutesToSchedule = task.getTotalMinutes() - task.getConsumedMinutes();
             }
 
-            if (minutesToSchedule <= 0) continue;
+            if (minutesToSchedule <= 0)
+                continue;
 
-            int available = calculateAvailableMinutes(slotPointers);
-            if (available <= 0) break;
+            int available = calculateAvailableMinutes(slotPointers, reservedBySlot);
+            if (available <= 0)
+                break;
 
             boolean splittable = !Boolean.FALSE.equals(task.getSplittable());
 
             if (!splittable) {
-                if (!canFitContiguously(slotPointers, minutesToSchedule)) continue;
+                if (!canFitContiguously(slotPointers, reservedBySlot, minutesToSchedule))
+                    continue;
             } else {
                 minutesToSchedule = Math.min(minutesToSchedule, available);
             }
@@ -175,14 +220,17 @@ public class SchedulingService {
             allocationRepository.save(allocation);
 
             List<ScheduleResponse.SlotResponse> slotResponses = splittable
-                    ? fillSlots(allocation, minutesToSchedule, slotPointers)
-                    : fillSlotsContiguously(allocation, minutesToSchedule, slotPointers);
+                    ? fillSlots(allocation, minutesToSchedule, slotPointers, reservedBySlot)
+                    : fillSlotsContiguously(allocation, minutesToSchedule, slotPointers, reservedBySlot);
 
             allocationResponses.add(buildAllocationResponse(allocation, task, slotResponses));
         }
 
-        // Prepend logged allocations to response
-        List<ScheduleResponse.AllocationResponse> doneResponses = loggedAllocations.stream()
+        // Prepend logged + carried-over allocations to response
+        List<DailyTaskAllocation> preservedAllocations = new ArrayList<>(loggedAllocations);
+        preservedAllocations.addAll(carriedOverAllocations);
+
+        List<ScheduleResponse.AllocationResponse> preservedResponses = preservedAllocations.stream()
                 .filter(a -> !Boolean.TRUE.equals(a.getConflict()))
                 .map(a -> {
                     ScheduleResponse.AllocationResponse ar = new ScheduleResponse.AllocationResponse();
@@ -192,6 +240,7 @@ public class SchedulingService {
                     ar.setPlannedMinutes(a.getPlannedMinutes());
                     ar.setActualMinutes(a.getActualMinutes());
                     ar.setDone(a.getDone());
+                    ar.setCarriedOver(a.isCarriedOver());
                     ar.setMemo(a.getMemo());
                     ar.setConsumedMinutes(a.getTask().getConsumedMinutes());
                     ar.setTotalMinutes(a.getTask().getTotalMinutes());
@@ -209,11 +258,12 @@ public class SchedulingService {
                     return ar;
                 })
                 .collect(Collectors.toList());
-        doneResponses.addAll(allocationResponses);
+        preservedResponses.addAll(allocationResponses);
 
         ScheduleResponse response = new ScheduleResponse();
         response.setDate(date);
-        response.setAllocations(doneResponses);
+        response.setClosed(false);
+        response.setAllocations(preservedResponses);
         response.setConflicts(conflictResponses);
         return response;
     }
@@ -272,25 +322,61 @@ public class SchedulingService {
         }
     }
 
-    private int calculateAvailableMinutes(Map<FreeSlot, LocalTime> slotPointers) {
+    private LocalTime skipReservedBlocks(LocalTime pointer, List<AllocationSlot> reserved) {
+        boolean advanced;
+        do {
+            advanced = false;
+            for (AllocationSlot as : reserved) {
+                if (!as.getStart().isAfter(pointer) && as.getEnd().isAfter(pointer)) {
+                    pointer = as.getEnd();
+                    advanced = true;
+                }
+            }
+        } while (advanced);
+        return pointer;
+    }
+
+    private LocalTime nextReservedStart(LocalTime pointer, List<AllocationSlot> reserved) {
+        return reserved.stream()
+                .map(AllocationSlot::getStart)
+                .filter(s -> s.isAfter(pointer))
+                .min(Comparator.naturalOrder())
+                .orElse(null);
+    }
+
+    private int calculateAvailableMinutes(Map<FreeSlot, LocalTime> slotPointers,
+                                          Map<Long, List<AllocationSlot>> reservedBySlot) {
         int total = 0;
         for (Map.Entry<FreeSlot, LocalTime> entry : slotPointers.entrySet()) {
             FreeSlot slot = entry.getKey();
-            LocalTime pointer = entry.getValue();
-            if (pointer.isBefore(slot.getEnd())) {
-                total += (int) java.time.Duration.between(pointer, slot.getEnd()).toMinutes();
+            List<AllocationSlot> reserved = reservedBySlot.getOrDefault(slot.getId(), Collections.emptyList());
+            LocalTime pointer = skipReservedBlocks(entry.getValue(), reserved);
+            while (pointer.isBefore(slot.getEnd())) {
+                LocalTime segEnd = nextReservedStart(pointer, reserved);
+                if (segEnd == null || segEnd.compareTo(slot.getEnd()) >= 0) {
+                    total += (int) java.time.Duration.between(pointer, slot.getEnd()).toMinutes();
+                    break;
+                }
+                total += (int) java.time.Duration.between(pointer, segEnd).toMinutes();
+                pointer = skipReservedBlocks(segEnd, reserved);
             }
         }
         return total;
     }
 
-    private boolean canFitContiguously(Map<FreeSlot, LocalTime> slotPointers, int minutesNeeded) {
+    private boolean canFitContiguously(Map<FreeSlot, LocalTime> slotPointers,
+                                       Map<Long, List<AllocationSlot>> reservedBySlot,
+                                       int minutesNeeded) {
         for (Map.Entry<FreeSlot, LocalTime> entry : slotPointers.entrySet()) {
             FreeSlot slot = entry.getKey();
-            LocalTime pointer = entry.getValue();
-            if (pointer.isBefore(slot.getEnd())) {
-                int available = (int) java.time.Duration.between(pointer, slot.getEnd()).toMinutes();
+            List<AllocationSlot> reserved = reservedBySlot.getOrDefault(slot.getId(), Collections.emptyList());
+            LocalTime pointer = skipReservedBlocks(entry.getValue(), reserved);
+            while (pointer.isBefore(slot.getEnd())) {
+                LocalTime segEnd = nextReservedStart(pointer, reserved);
+                LocalTime effectiveEnd = (segEnd != null && segEnd.isBefore(slot.getEnd())) ? segEnd : slot.getEnd();
+                int available = (int) java.time.Duration.between(pointer, effectiveEnd).toMinutes();
                 if (available >= minutesNeeded) return true;
+                pointer = skipReservedBlocks(effectiveEnd, reserved);
             }
         }
         return false;
@@ -299,7 +385,8 @@ public class SchedulingService {
     private List<ScheduleResponse.SlotResponse> fillSlots(
             DailyTaskAllocation allocation,
             int minutesNeeded,
-            Map<FreeSlot, LocalTime> slotPointers) {
+            Map<FreeSlot, LocalTime> slotPointers,
+            Map<Long, List<AllocationSlot>> reservedBySlot) {
 
         List<ScheduleResponse.SlotResponse> slotResponses = new ArrayList<>();
         int remaining = minutesNeeded;
@@ -308,29 +395,38 @@ public class SchedulingService {
             if (remaining <= 0) break;
 
             FreeSlot slot = entry.getKey();
-            LocalTime pointer = entry.getValue();
-            if (!pointer.isBefore(slot.getEnd())) continue;
+            List<AllocationSlot> reserved = reservedBySlot.getOrDefault(slot.getId(), Collections.emptyList());
+            LocalTime pointer = skipReservedBlocks(entry.getValue(), reserved);
 
-            int available = (int) java.time.Duration.between(pointer, slot.getEnd()).toMinutes();
-            int use = Math.min(remaining, available);
-            LocalTime end = pointer.plusMinutes(use);
+            while (remaining > 0 && pointer.isBefore(slot.getEnd())) {
+                LocalTime segEnd = nextReservedStart(pointer, reserved);
+                LocalTime effectiveEnd = (segEnd != null && segEnd.isBefore(slot.getEnd())) ? segEnd : slot.getEnd();
 
-            AllocationSlot as = new AllocationSlot();
-            as.setDailyTaskAllocation(allocation);
-            as.setFreeSlot(slot);
-            as.setStart(pointer);
-            as.setEnd(end);
-            as.setMinutes(use);
-            allocationSlotRepository.save(as);
+                int available = (int) java.time.Duration.between(pointer, effectiveEnd).toMinutes();
+                if (available <= 0) { pointer = skipReservedBlocks(effectiveEnd, reserved); continue; }
 
-            ScheduleResponse.SlotResponse sr = new ScheduleResponse.SlotResponse();
-            sr.setStart(pointer);
-            sr.setEnd(end);
-            sr.setMinutes(use);
-            slotResponses.add(sr);
+                int use = Math.min(remaining, available);
+                LocalTime end = pointer.plusMinutes(use);
 
-            slotPointers.put(slot, end);
-            remaining -= use;
+                AllocationSlot as = new AllocationSlot();
+                as.setDailyTaskAllocation(allocation);
+                as.setFreeSlot(slot);
+                as.setStart(pointer);
+                as.setEnd(end);
+                as.setMinutes(use);
+                allocationSlotRepository.save(as);
+
+                ScheduleResponse.SlotResponse sr = new ScheduleResponse.SlotResponse();
+                sr.setStart(pointer);
+                sr.setEnd(end);
+                sr.setMinutes(use);
+                slotResponses.add(sr);
+
+                pointer = skipReservedBlocks(end, reserved);
+                remaining -= use;
+            }
+
+            slotPointers.put(slot, pointer);
         }
 
         return slotResponses;
@@ -339,33 +435,41 @@ public class SchedulingService {
     private List<ScheduleResponse.SlotResponse> fillSlotsContiguously(
             DailyTaskAllocation allocation,
             int minutesNeeded,
-            Map<FreeSlot, LocalTime> slotPointers) {
+            Map<FreeSlot, LocalTime> slotPointers,
+            Map<Long, List<AllocationSlot>> reservedBySlot) {
 
         for (Map.Entry<FreeSlot, LocalTime> entry : slotPointers.entrySet()) {
             FreeSlot slot = entry.getKey();
-            LocalTime pointer = entry.getValue();
-            if (!pointer.isBefore(slot.getEnd())) continue;
+            List<AllocationSlot> reserved = reservedBySlot.getOrDefault(slot.getId(), Collections.emptyList());
+            LocalTime pointer = skipReservedBlocks(entry.getValue(), reserved);
 
-            int available = (int) java.time.Duration.between(pointer, slot.getEnd()).toMinutes();
-            if (available < minutesNeeded) continue;
+            while (pointer.isBefore(slot.getEnd())) {
+                LocalTime segEnd = nextReservedStart(pointer, reserved);
+                LocalTime effectiveEnd = (segEnd != null && segEnd.isBefore(slot.getEnd())) ? segEnd : slot.getEnd();
 
-            LocalTime end = pointer.plusMinutes(minutesNeeded);
+                int available = (int) java.time.Duration.between(pointer, effectiveEnd).toMinutes();
+                if (available >= minutesNeeded) {
+                    LocalTime end = pointer.plusMinutes(minutesNeeded);
 
-            AllocationSlot as = new AllocationSlot();
-            as.setDailyTaskAllocation(allocation);
-            as.setFreeSlot(slot);
-            as.setStart(pointer);
-            as.setEnd(end);
-            as.setMinutes(minutesNeeded);
-            allocationSlotRepository.save(as);
+                    AllocationSlot as = new AllocationSlot();
+                    as.setDailyTaskAllocation(allocation);
+                    as.setFreeSlot(slot);
+                    as.setStart(pointer);
+                    as.setEnd(end);
+                    as.setMinutes(minutesNeeded);
+                    allocationSlotRepository.save(as);
 
-            slotPointers.put(slot, end);
+                    slotPointers.put(slot, end);
 
-            ScheduleResponse.SlotResponse sr = new ScheduleResponse.SlotResponse();
-            sr.setStart(pointer);
-            sr.setEnd(end);
-            sr.setMinutes(minutesNeeded);
-            return List.of(sr);
+                    ScheduleResponse.SlotResponse sr = new ScheduleResponse.SlotResponse();
+                    sr.setStart(pointer);
+                    sr.setEnd(end);
+                    sr.setMinutes(minutesNeeded);
+                    return List.of(sr);
+                }
+
+                pointer = skipReservedBlocks(effectiveEnd, reserved);
+            }
         }
 
         return List.of();
@@ -412,6 +516,7 @@ public class SchedulingService {
         ar.setPlannedMinutes(allocation.getPlannedMinutes());
         ar.setActualMinutes(0);
         ar.setDone(null);
+        ar.setCarriedOver(false);
         ar.setConsumedMinutes(task.getConsumedMinutes());
         ar.setTotalMinutes(task.getTotalMinutes());
         ar.setDdl(task.getDdl());
@@ -436,6 +541,7 @@ public class SchedulingService {
                     ar.setPlannedMinutes(a.getPlannedMinutes());
                     ar.setActualMinutes(a.getActualMinutes());
                     ar.setDone(a.getDone());
+                    ar.setCarriedOver(a.isCarriedOver());
                     ar.setMemo(a.getMemo());
                     ar.setConsumedMinutes(a.getTask().getConsumedMinutes());
                     ar.setTotalMinutes(a.getTask().getTotalMinutes());
@@ -468,6 +574,7 @@ public class SchedulingService {
 
         ScheduleResponse response = new ScheduleResponse();
         response.setDate(date);
+        response.setClosed(dayEntry.isClosed());
         response.setAllocations(allocationResponses);
         response.setConflicts(conflictResponses);
         return response;

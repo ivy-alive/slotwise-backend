@@ -70,21 +70,45 @@ Users can create, edit, and delete two types of tasks:
 
 ### Req 2 — Daily Scheduling
 
-- User selects a date on a calendar
-- User inputs one or more free time slots for that day (e.g. 09:00–11:00, 20:00–22:00)
-- System auto-generates a daily plan by fitting tasks into those slots:
-  - **Step 1 — Recurring tasks with preferred days:** scheduled first on their designated days
-    - Must (HIGH): flagged as conflict if no time available
-    - Normal (LOW): silently skipped if no time available
-    - Non-splittable tasks require a contiguous block; splittable tasks fill across slots
-  - **Step 2 — All remaining tasks** (one-time + recurring without a preferred day today):
-    - Sorted by: cycle debt → deadline within 3 days → priority
-    - Recurring tasks only appear here if behind on their cycle quota
-    - Splittable tasks fill available time; non-splittable tasks require a single block
-    - Tasks with unmet dependencies are skipped
-- Free slots can be added, edited, and deleted
-- Calendar shows public holidays (via Nager.Date API) and weekends in red
-- Week overview shows all 7 days with task summaries; a single Update button re-schedules all days in the week that have entries
+- User selects a date on a calendar; public holidays and weekends are highlighted in red
+- User enters one or more free time slots for the day (e.g. 09:00–11:00, 20:00–22:00); slots can be added, edited, or deleted at any time
+- Clicking **Update** generates (or regenerates) the day's task plan by fitting tasks into those free slots
+- The week overview shows all 7 days with task summaries; a single **Update** button regenerates all open days in the week that have entries
+
+#### How tasks are selected and ordered
+
+The scheduler runs in two passes:
+
+**Pass 1 — Recurring tasks with a preferred day matching today**
+These are scheduled first, in Must-before-Normal order:
+- A Must (HIGH) task that cannot fit is flagged as a conflict so the user is aware
+- A Normal (LOW) task that cannot fit is silently skipped
+
+**Pass 2 — Everything else**
+All remaining incomplete tasks are considered, sorted from highest to lowest urgency:
+1. One-time tasks whose deadline has already passed
+2. Recurring tasks behind on their cycle quota for the current period
+3. One-time tasks with a deadline within the next 3 days
+4. Must (HIGH) priority tasks
+5. Normal (LOW) priority tasks
+
+Recurring tasks are only scheduled in this pass if they are behind on quota; tasks whose dependencies are not yet completed are skipped entirely.
+
+#### How tasks are fitted into free slots
+
+- **Non-splittable tasks** require a single uninterrupted block of time large enough for the full duration; if no such block exists the task is skipped (Pass 2) or flagged as conflict (Pass 1, Must only)
+- **Splittable tasks** fill whatever free time is available across one or more slots, up to the remaining duration
+
+When the schedule is regenerated on a day that already has logged or carried-over entries, those entries' time blocks are treated as occupied and new tasks are placed around them — no logged time is overwritten.
+
+#### Closing a day
+
+Once the user is done for the day, they click **Call it a day**:
+- The day is locked; its plan can no longer be edited or regenerated
+- Any tasks that were not logged (unfinished or untouched) are automatically carried over to tomorrow, marked as "Carried over", and slotted into tomorrow's schedule if tomorrow already has free slots defined
+- A closed day shows a lock indicator in the week overview
+
+If needed, the user can **Reopen** a closed day to make changes again.
 
 ### Req 3 — Actual Time Logging
 
@@ -92,7 +116,7 @@ After completing (or attempting) a task each day, the user logs progress via an 
 
 **Done:**
 - Mark the allocation as Done, enter actual minutes used, add an optional memo
-- Consumed minutes are incremented on the task; task is marked completed when fully consumed
+- Consumed minutes are incremented on the task; task is immediately marked `completed = true` regardless of remaining minutes (the user's intent is authoritative)
 
 **Not Done:**
 - Mark as Not Done, enter minutes spent, optionally override the remaining minutes, add a memo
@@ -146,6 +170,7 @@ erDiagram
     day_entries {
         Long id PK
         Date date
+        Boolean closed
     }
 
     free_slots {
@@ -163,6 +188,7 @@ erDiagram
         Integer actualMinutes
         Boolean done
         Boolean conflict
+        Boolean carriedOver
         String memo
     }
 
@@ -208,6 +234,9 @@ erDiagram
 | POST | /day-entries/{date}/schedule | Generate / update schedule |
 | GET | /day-entries/{date}/schedule | Get existing schedule |
 | PUT | /day-entries/{date}/allocations/{id} | Log actual time and memo |
+| DELETE | /day-entries/{date}/allocations/{id}/log | Clear a logged entry |
+| POST | /day-entries/{date}/call-it-a-day | Close day and carry over unfinished tasks |
+| POST | /day-entries/{date}/reopen | Reopen a closed day |
 
 ---
 

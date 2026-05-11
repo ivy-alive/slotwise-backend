@@ -10,6 +10,7 @@ import java.util.List;
 @Data
 public class ScheduleResponse {
     private LocalDate date;
+    private boolean closed;
     private List<AllocationResponse> allocations;
     private List<ConflictResponse> conflicts;
 
@@ -21,6 +22,7 @@ public class ScheduleResponse {
         private Integer plannedMinutes;
         private Integer actualMinutes;
         private Boolean done;
+        private boolean carriedOver;
         private String memo;
         private Integer consumedMinutes;
         private Integer totalMinutes;

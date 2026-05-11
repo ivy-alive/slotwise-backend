@@ -26,6 +26,7 @@ public class DailyTaskAllocation {
     private Integer actualMinutes;
     private Boolean done;
     private Boolean conflict;
+    private boolean carriedOver = false;
 
     @Column(length = 1000)
     private String memo;
