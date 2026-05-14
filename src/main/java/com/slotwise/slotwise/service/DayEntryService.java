@@ -208,6 +208,16 @@ public class DayEntryService {
                 .orElseThrow(() -> new ResourceNotFoundException("DayEntry not found: " + dateStr));
         dayEntry.setClosed(false);
         dayEntryRepository.save(dayEntry);
+
+        // Reset carriedOver on unlogged allocations so the next schedule() call can
+        // freely delete and re-place them according to the updated free slots.
+        // Logged allocations (done != null) are intentionally left untouched.
+        List<DailyTaskAllocation> unloggedCarriedOver = allocationRepository.findByDayEntryId(dayEntry.getId())
+                .stream()
+                .filter(a -> a.getDone() == null && a.isCarriedOver())
+                .collect(Collectors.toList());
+        unloggedCarriedOver.forEach(a -> a.setCarriedOver(false));
+        allocationRepository.saveAll(unloggedCarriedOver);
     }
 
     private DayEntryResponse toResponse(DayEntry dayEntry) {
